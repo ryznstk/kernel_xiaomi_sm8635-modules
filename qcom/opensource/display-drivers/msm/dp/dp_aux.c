@@ -7,7 +7,7 @@
 #include <linux/delay.h>
 #if IS_ENABLED(CONFIG_QCOM_WCD939X_I2C)
 #include <linux/soc/qcom/wcd939x-i2c.h>
-#elif IS_ENABLED(CONFIG_QCOM_FSA4480_I2C)
+#elif IS_ENABLED(CONFIG_QCOM_DP_FSA4480_I2C)
 #include <linux/soc/qcom/fsa4480-i2c.h>
 #endif
 
@@ -823,7 +823,7 @@ static int dp_aux_configure_wcd_switch(struct dp_aux *dp_aux,
 end:
 	return rc;
 }
-#elif IS_ENABLED(CONFIG_QCOM_FSA4480_I2C)
+#elif IS_ENABLED(CONFIG_QCOM_DP_FSA4480_I2C)
 static int dp_aux_configure_fsa_switch(struct dp_aux *dp_aux,
 		bool enable, int orientation)
 {
@@ -924,7 +924,7 @@ struct dp_aux *dp_aux_get(struct device *dev, struct dp_catalog_aux *catalog,
 			dp_aux->switch_register_notifier = wcd_usbss_reg_notifier;
 			dp_aux->switch_unregister_notifier = wcd_usbss_unreg_notifier;
 		}
-#elif IS_ENABLED(CONFIG_QCOM_FSA4480_I2C)
+#elif IS_ENABLED(CONFIG_QCOM_DP_FSA4480_I2C)
 		if (switch_type == DP_AUX_SWITCH_FSA4480) {
 			dp_aux->switch_configure = dp_aux_configure_fsa_switch;
 			dp_aux->switch_register_notifier = fsa4480_reg_notifier;
