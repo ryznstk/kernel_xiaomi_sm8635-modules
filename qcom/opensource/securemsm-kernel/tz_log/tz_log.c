@@ -1963,7 +1963,11 @@ exit_free_diag_buf:
 	return -ENXIO;
 }
 
+#if KERNEL_VERSION(6, 10, 0) > LINUX_VERSION_CODE
 static int tz_log_remove(struct platform_device *pdev)
+#else
+static void tz_log_remove(struct platform_device *pdev)
+#endif
 {
 	tzdbg_fs_exit(pdev);
 	dma_free_coherent(&pdev->dev, display_buf_size,
@@ -1972,7 +1976,9 @@ static int tz_log_remove(struct platform_device *pdev)
 	tzdbg_free_qsee_log_buf(pdev);
 	if (!tzdbg.is_encrypted_log_enabled)
 		kfree(tzdbg.diag_buf);
+#if KERNEL_VERSION(6, 10, 0) > LINUX_VERSION_CODE
 	return 0;
+#endif
 }
 
 #ifdef CONFIG_PM

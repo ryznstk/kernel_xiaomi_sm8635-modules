@@ -631,6 +631,7 @@ struct smq_invoke_ctx {
 	uint64_t xo_time_in_us_created; /* XO Timestamp (in us) of ctx creation */
 	uint64_t xo_time_in_us_interrupted; /* XO Timestamp (in us) of interrupted ctx */
 	uint64_t xo_time_in_us_restored; /* XO Timestamp (in us) of restored ctx */
+	struct timespec64 invoke_start_time;  /* submission timestamp for async perf */
 	int tx_index; /* index of current ctx in channel gmsg_log array */
 	bool is_job_sent_to_remote_ss; /* Flag to check if job is sent to remote sub system */
 };

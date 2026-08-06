@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -440,6 +440,8 @@ static inline void __qdf_bug(void)
 		} \
 	} while (0)
 
+#define __QDF_ASSERT_MSG "Assertion failed! %s:%s %s:%d\n"
+
 #define QDF_BUG_ON_ASSERT(_condition) \
 	do { \
 		if (!(_condition)) { \
@@ -465,6 +467,8 @@ static inline void __qdf_bug(void)
 			/* no-op */ \
 		} \
 	} while (0)
+
+#define __QDF_ASSERT_MSG "WARNING!! %s:%s %s:%d\n"
 
 #define QDF_BUG_ON_ASSERT(_condition) \
 	do { \
