@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/uaccess.h>
@@ -242,6 +242,11 @@ static int cam_jpeg_process_next_hw_update(void *priv, void *data,
 	}
 
 	ctx_data = (struct cam_jpeg_hw_ctx_data *)data;
+	if (!ctx_data->cdm_cmd) {
+		CAM_ERR(CAM_JPEG, "Invalid ctx_data->cdm_cmd");
+		return -EINVAL;
+	}
+
 	dev_type = ctx_data->jpeg_dev_acquire_info.dev_type;
 	p_cfg_req = hw_mgr->dev_hw_cfg_args[dev_type][0];
 	config_args = (struct cam_hw_config_args *)&p_cfg_req->hw_cfg_args;
@@ -797,7 +802,6 @@ static int cam_jpeg_mgr_process_hw_update_entries(void *priv, void *data)
 
 	if (!config_args->num_hw_update_entries) {
 		CAM_ERR(CAM_JPEG, "No hw update enteries are available");
-		mutex_unlock(&hw_mgr->hw_mgr_mutex);
 		rc = -EINVAL;
 		goto end_unusedev;
 	}
@@ -805,7 +809,6 @@ static int cam_jpeg_mgr_process_hw_update_entries(void *priv, void *data)
 	ctx_data = (struct cam_jpeg_hw_ctx_data *)config_args->ctxt_to_hw_map;
 	if (!ctx_data->in_use) {
 		CAM_ERR(CAM_JPEG, "ctx is not in use");
-		mutex_unlock(&hw_mgr->hw_mgr_mutex);
 		rc = -EINVAL;
 		goto end_unusedev;
 	}
@@ -871,7 +874,6 @@ static int cam_jpeg_mgr_process_hw_update_entries(void *priv, void *data)
 	return rc;
 
 end_callcb:
-	mutex_unlock(&hw_mgr->hw_mgr_mutex);
 	if (p_cfg_req) {
 		buf_data.num_handles =
 			config_args->num_out_map_entries;
@@ -892,7 +894,6 @@ end_callcb:
 		}
 	}
 end_unusedev:
-	mutex_lock(&hw_mgr->hw_mgr_mutex);
 	hw_mgr->device_in_use[p_cfg_req->dev_type][0] = false;
 	hw_mgr->dev_hw_cfg_args[p_cfg_req->dev_type][0] = NULL;
 
@@ -1398,7 +1399,6 @@ static int cam_jpeg_mgr_release_hw(void *hw_mgr_priv, void *release_hw_args)
 		cam_cdm_release(hw_mgr->cdm_info[dev_type][0].cdm_handle);
 	}
 
-	mutex_unlock(&hw_mgr->hw_mgr_mutex);
 
 	rc = cam_jpeg_mgr_release_ctx(hw_mgr, ctx_data);
 	if (rc) {
@@ -1413,6 +1413,7 @@ static int cam_jpeg_mgr_release_hw(void *hw_mgr_priv, void *release_hw_args)
 	kfree(ctx_data->cdm_cmd);
 	ctx_data->cdm_cmd = NULL;
 	CAM_DBG(CAM_JPEG, "handle %llu", ctx_data);
+	mutex_unlock(&hw_mgr->hw_mgr_mutex);
 
 	return rc;
 }

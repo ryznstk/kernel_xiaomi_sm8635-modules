@@ -60,18 +60,32 @@ register_securemsm_module(
     #copts = ["-include", "config/sec-kernel_defconfig_qseecom.h"],
 )
 
-
 register_securemsm_module(
     name = "smcinvoke_dlkm",
     path = SMCINVOKE_PATH,
     default_srcs = [
-        "smcinvoke.c",
-        "smcinvoke_kernel.c",
-        "trace_smcinvoke.h",
         "IQSEEComCompat.h",
         "IQSEEComCompatAppLoader.h",
-        "smci_kernel.c",
     ],
+    config_srcs = {
+        "CONFIG_QCOM_SI_CORE": {
+            True: [
+                "si_core_xts/qseecom.c",
+                "si_core_xts/smci_kernel.c",
+                "si_core_xts/smci.c",
+                "si_core_xts/smci_irq.c",
+                "si_core_xts/smci_impl.h",
+                "si_core_xts/smci_irq.h",
+
+            ],
+            False: [
+                "compat/smcinvoke.c",
+                "compat/smcinvoke_kernel.c",
+                "compat/smci_kernel.c",
+                "compat/trace_smcinvoke.h",
+            ],
+        }
+    },
     deps = [":smcinvoke_kernel_headers", ":qseecom_kernel_headers", "%b_qseecom_dlkm"],
     hdrs = [":smcinvoke_kernel_headers"],
 )

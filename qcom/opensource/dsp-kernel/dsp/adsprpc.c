@@ -1763,6 +1763,20 @@ static int overlap_ptr_cmp(const void *a, const void *b)
 	return st == 0 ? ed : st;
 }
 
+/**
+ * context_build_overlap - Detect and handle buffer overlaps in RPC args
+ * @ctx: The invoke context containing buffer information
+ *
+ * This function detects overlapping memory regions in the RPC arguments and
+ * adjusts the memory mapping accordingly. It handles ION and non-ION buffers
+ * separately to prevent incorrect overlap detection between different buf types.
+ * For each buffer type:
+ * - If a buffer overlaps with a previous buffer of the same type, it adjusts
+ *   the mapping to avoid the overlap
+ * - If no overlap is detected, it uses the full buffer range
+ *
+ * Return: 0 on success, error code on failure
+ */
 static int context_build_overlap(struct smq_invoke_ctx *ctx)
 {
 	int i, err = 0;
@@ -1770,7 +1784,9 @@ static int context_build_overlap(struct smq_invoke_ctx *ctx)
 	int inbufs = REMOTE_SCALARS_INBUFS(ctx->sc);
 	int outbufs = REMOTE_SCALARS_OUTBUFS(ctx->sc);
 	int nbufs = inbufs + outbufs;
-	struct overlap max;
+	struct overlap max_nonion;
+	struct overlap max_ion;
+	struct overlap *max;
 
 	for (i = 0; i < nbufs; ++i) {
 		ctx->overs[i].start = (uintptr_t)lpra[i].buf.pv;
@@ -1790,21 +1806,29 @@ static int context_build_overlap(struct smq_invoke_ctx *ctx)
 		ctx->overps[i] = &ctx->overs[i];
 	}
 	sort(ctx->overps, nbufs, sizeof(*ctx->overps), overlap_ptr_cmp, NULL);
-	max.start = 0;
-	max.end = 0;
+	max_nonion.start = 0;
+	max_nonion.end = 0;
+	max_ion.start = 0;
+	max_ion.end = 0;
+	max_nonion.raix = -1;
+	max_ion.raix = -1;
 	for (i = 0; i < nbufs; ++i) {
-		if (ctx->overps[i]->start < max.end) {
-			ctx->overps[i]->mstart = max.end;
+		int raix = ctx->overps[i]->raix;
+		/* Separate ION and non-ION buffers; fd <= 0 indicates non-ION */
+		max = (ctx->fds && ctx->fds[raix] > 0) ? &max_ion : &max_nonion;
+		if (ctx->overps[i]->start < max->end) {
+			ctx->overps[i]->mstart = max->end;
 			ctx->overps[i]->mend = ctx->overps[i]->end;
-			ctx->overps[i]->offset = max.end -
+			ctx->overps[i]->offset = max->end -
 				ctx->overps[i]->start;
-			if (ctx->overps[i]->end > max.end) {
-				max.end = ctx->overps[i]->end;
+			if (ctx->overps[i]->end > max->end) {
+				max->end = ctx->overps[i]->end;
+				max->raix = raix;
 			} else {
-				if ((max.raix < inbufs &&
+				if ((max->raix < inbufs &&
 					ctx->overps[i]->raix + 1 > inbufs) ||
 					(ctx->overps[i]->raix < inbufs &&
-					max.raix + 1 > inbufs))
+					max->raix + 1 > inbufs))
 					ctx->overps[i]->do_cmo = 1;
 				ctx->overps[i]->mend = 0;
 				ctx->overps[i]->mstart = 0;
@@ -1813,7 +1837,7 @@ static int context_build_overlap(struct smq_invoke_ctx *ctx)
 			ctx->overps[i]->mend = ctx->overps[i]->end;
 			ctx->overps[i]->mstart = ctx->overps[i]->start;
 			ctx->overps[i]->offset = 0;
-			max = *ctx->overps[i];
+			*max = *ctx->overps[i];
 		}
 	}
 bail:
@@ -2676,6 +2700,21 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx)
 			}
 			pages[idx].addr = map->phys + offset;
 			pages[idx].size = num << PAGE_SHIFT;
+			/*
+			 * Check for page range overflow and validate page
+			 * range is not greater than map buffer range.
+			 * This prevents potential buffer overflow
+			 * and memory corruption that could be exploited.
+			 */
+			if (pages[idx].addr > (ULLONG_MAX - pages[idx].size) ||
+			   (pages[idx].addr + pages[idx].size) >
+					(map->phys + map->size)) {
+				err = -EFAULT;
+				ADSPRPC_ERR(
+					"Invalid buffer addr 0x%llx len 0x%zx IPA 0x%llx size 0x%llx fd %d\n",
+					buf, len, map->phys, map->size, map->fd);
+				goto bail;
+			}
 		}
 		rpra[i].buf.pv = buf;
 	}
@@ -3465,6 +3504,15 @@ int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 	PERF_END);
 	trace_fastrpc_msg("inv_args_1: end");
 
+	/*
+	* Store submission timestamp in ctx before sending to DSP.
+	* For async invokes, perf->invoke will be updated in the collector
+	* thread (fastrpc_wait_on_async_queue) where ctx is still valid,
+	* measuring full end-to-end latency consistent with the sync path.
+	*/
+	if (fl->profile && isasyncinvoke)
+		ctx->invoke_start_time = invoket;
+
 	PERF(fl->profile, GET_COUNTER(perf_counter, PERF_LINK),
 	VERIFY(err, 0 == (err = fastrpc_invoke_send(ctx,
 		kernel, invoke->handle)));
@@ -3546,9 +3594,6 @@ int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 	}
 
 invoke_end:
-	if (fl->profile && !interrupted && isasyncinvoke)
-		fastrpc_update_invoke_count(invoke->handle, perf_counter,
-						&invoket);
 	return err;
 }
 
@@ -3627,6 +3672,15 @@ bail:
 		async_res->result = ierr;
 	if (ctx) {
 		if (fl->profile && ctx->perf && ctx->handle > FASTRPC_STATIC_HANDLE_MAX) {
+		/*
+		* Update invoke/count perf counters here where ctx->perf is
+		* guaranteed valid. This measures full end-to-end async latency
+		* (submit → DSP → collect), consistent with the sync path.
+		* invoke_start_time was stored in ctx before fastrpc_invoke_send
+		* in fastrpc_internal_invoke.
+		*/
+			fastrpc_update_invoke_count(ctx->handle, perf_counter,
+				&ctx->invoke_start_time);
 			trace_fastrpc_perf_counters(ctx->handle, ctx->sc,
 			ctx->perf->count, ctx->perf->flush, ctx->perf->map,
 			ctx->perf->copy, ctx->perf->link, ctx->perf->getargs,

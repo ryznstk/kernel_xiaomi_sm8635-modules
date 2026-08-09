@@ -18,6 +18,8 @@ ddk_headers(
         "include/smci/interface/smci_opener.h",
         "include/linux/ITrustedCameraDriver.h",
         "include/linux/CTrustedCameraDriver.h",
+        "include/linux/trusted_camera_driver.h",
+        "include/linux/ctrusted_camera_driver.h",
     ]),
     includes = [
         "include",
