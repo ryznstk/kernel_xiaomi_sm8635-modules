@@ -59,6 +59,39 @@ int register_xiaomi_touch_client(enum touch_id touch_id,
  */
 int unregister_xiaomi_touch_client(enum touch_id touch_id);
 
+enum touch_filter_type {
+	TOUCH_FILTER_UP_THRESHOLD,
+	TOUCH_FILTER_TOLERANCE,
+	TOUCH_FILTER_AIM_SENSITIVITY,
+	TOUCH_FILTER_TAP_STABILITY,
+	TOUCH_FILTER_EDGE_FILTER,
+	TOUCH_FILTER_PANEL_ORIENTATION,
+	TOUCH_FILTER_EXPERT_MODE,
+	TOUCH_FILTER_NUM,
+};
+
+static inline enum touch_filter_type touch_mode_to_filter(enum touch_mode mode)
+{
+	switch (mode) {
+	case TOUCH_MODE_TOUCH_UP_THRESHOLD:
+		return TOUCH_FILTER_UP_THRESHOLD;
+	case TOUCH_MODE_TOUCH_TOLERANCE:
+		return TOUCH_FILTER_TOLERANCE;
+	case TOUCH_MODE_TOUCH_AIM_SENSITIVITY:
+		return TOUCH_FILTER_AIM_SENSITIVITY;
+	case TOUCH_MODE_TOUCH_TAP_STABILITY:
+		return TOUCH_FILTER_TAP_STABILITY;
+	case TOUCH_MODE_TOUCH_EDGE_FILTER:
+		return TOUCH_FILTER_EDGE_FILTER;
+	case TOUCH_MODE_PANEL_ORIENTATION:
+		return TOUCH_FILTER_PANEL_ORIENTATION;
+	case TOUCH_MODE_EXPERT_MODE:
+		return TOUCH_FILTER_EXPERT_MODE;
+	default:
+		return TOUCH_FILTER_NUM;
+	}
+}
+
 enum oneshot_sensor_type {
 	ONESHOT_SENSOR_SINGLE_TAP,
 	ONESHOT_SENSOR_DOUBLE_TAP,

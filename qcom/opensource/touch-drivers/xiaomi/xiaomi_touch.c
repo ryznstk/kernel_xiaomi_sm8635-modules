@@ -10,12 +10,14 @@
 
 #include "xiaomi_touch.h"
 
-#include <linux/fs.h>
 #include <linux/device.h>
+#include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/slab.h>
 #include <linux/soc/qcom/panel_event_notifier.h>
+#include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
@@ -375,9 +377,7 @@ static int touch_mode_set(enum touch_mode mode, int value)
 	if (!interface || !interface->set_mode_value)
 		return -EFAULT;
 
-	interface->set_mode_value(interface->private, mode, value);
-
-	return 0;
+	return interface->set_mode_value(interface->private, mode, value);
 }
 
 static ssize_t touch_mode_show(struct device *dev,
@@ -429,10 +429,12 @@ static ssize_t touch_mode_store(struct device *dev,
 
 TOUCH_MODE_ATTR_RW(bump_sample_rate, TOUCH_MODE_REPORT_RATE);
 TOUCH_MODE_ATTR_RW(fod_finger_state, TOUCH_MODE_FOD_FINGER_STATE);
+TOUCH_MODE_ATTR_RW(game_mode, TOUCH_MODE_GAME_MODE);
 
 static struct attribute *touch_mode_attrs[] = {
 	&touch_mode_attr_bump_sample_rate.dev_attr.attr,
 	&touch_mode_attr_fod_finger_state.dev_attr.attr,
+	&touch_mode_attr_game_mode.dev_attr.attr,
 	NULL,
 };
 
@@ -441,9 +443,112 @@ static const struct attribute_group touch_mode_group = {
 	.attrs = touch_mode_attrs,
 };
 
+struct touch_filter {
+	const char *name;
+	enum touch_mode mode;
+};
+
+static const struct touch_filter touch_filter_map[] = {
+	{ "touch_up_threshold", TOUCH_MODE_TOUCH_UP_THRESHOLD },
+	{ "touch_tolerance", TOUCH_MODE_TOUCH_TOLERANCE },
+	{ "touch_aim_sensitivity", TOUCH_MODE_TOUCH_AIM_SENSITIVITY },
+	{ "touch_tap_stability", TOUCH_MODE_TOUCH_TAP_STABILITY },
+	{ "touch_edge_filter", TOUCH_MODE_TOUCH_EDGE_FILTER },
+	{ "panel_orientation", TOUCH_MODE_PANEL_ORIENTATION },
+	{ "expert_mode", TOUCH_MODE_EXPERT_MODE },
+};
+
+#define TOUCH_FILTER_CHAIN_NUM (ARRAY_SIZE(touch_filter_map) - 1)
+
+static ssize_t touch_filters_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	ssize_t count;
+	size_t i;
+	int value;
+
+	count = snprintf(buf, PAGE_SIZE, "%40s: filter value\n",
+			 "filter name[filter id]");
+
+	for (i = 0; i < ARRAY_SIZE(touch_filter_map); i++) {
+		value = touch_mode_get(touch_filter_map[i].mode);
+		if (value < 0)
+			count += snprintf(buf + count, PAGE_SIZE - count,
+					  "%36s[%02zu]: unsupported (%d)\n",
+					  touch_filter_map[i].name, i, value);
+		else
+			count += snprintf(buf + count, PAGE_SIZE - count,
+					  "%36s[%02zu]: %d\n",
+					  touch_filter_map[i].name, i, value);
+	}
+
+	return count;
+}
+
+static ssize_t touch_filters_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *arg, size_t count)
+{
+	unsigned int values[ARRAY_SIZE(touch_filter_map)];
+	char *input, *input_dup, *token;
+	size_t i, num_values = 0;
+	int ret = 0;
+
+	input = kstrdup(arg, GFP_KERNEL);
+	if (!input)
+		return -ENOMEM;
+	input_dup = input;
+	input = strim(input);
+	while ((token = strsep(&input, " \t\n")) != NULL) {
+		if (!*token)
+			continue;
+		if (num_values >= ARRAY_SIZE(values) ||
+		    kstrtouint(token, 10, &values[num_values])) {
+			ret = -EINVAL;
+			goto exit;
+		}
+		num_values++;
+	}
+
+	if (num_values == 2) {
+		if (values[0] >= ARRAY_SIZE(touch_filter_map)) {
+			ret = -EINVAL;
+			goto exit;
+		}
+		ret = touch_mode_set(touch_filter_map[values[0]].mode,
+				     values[1]);
+	} else if (num_values == TOUCH_FILTER_CHAIN_NUM) {
+		for (i = 0; i < TOUCH_FILTER_CHAIN_NUM; i++) {
+			ret = touch_mode_set(touch_filter_map[i].mode,
+					     values[i]);
+			if (ret < 0)
+				break;
+		}
+	} else {
+		ret = -EINVAL;
+	}
+
+exit:
+	kfree(input_dup);
+
+	return ret ? ret : count;
+}
+
+static DEVICE_ATTR_RW(touch_filters);
+
+static struct attribute *touch_filter_attrs[] = {
+	&dev_attr_touch_filters.attr,
+	NULL,
+};
+
+static const struct attribute_group touch_filter_group = {
+	.attrs = touch_filter_attrs,
+};
+
 const struct attribute_group *touch_attr_groups[] = {
 	&oneshot_sensor_group,
 	&touch_mode_group,
+	&touch_filter_group,
 	NULL,
 };
 
