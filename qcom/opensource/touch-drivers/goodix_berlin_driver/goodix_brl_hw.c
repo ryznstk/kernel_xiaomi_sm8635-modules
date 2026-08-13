@@ -327,70 +327,149 @@ exit:
 }
 
 #define GOODIX_GAME_CMD 0x17
-#define GOODIX_NORMAL_CMD	0x18
-static int brl_switch_edge_filter(struct goodix_ts_core *cd, bool high)
+#define GOODIX_NORMAL_CMD 0x18
+
+static const u8 goodix_filter_max[TOUCH_FILTER_NUM] = {
+	[TOUCH_FILTER_UP_THRESHOLD] = 4,
+	[TOUCH_FILTER_TOLERANCE] = 4,
+	[TOUCH_FILTER_AIM_SENSITIVITY] = 4,
+	[TOUCH_FILTER_TAP_STABILITY] = 4,
+	[TOUCH_FILTER_EDGE_FILTER] = 3,
+	[TOUCH_FILTER_PANEL_ORIENTATION] = 3,
+	[TOUCH_FILTER_EXPERT_MODE] = GOODIX_EXPERT_LEVEL_NUM,
+};
+
+static const u8 goodix_filter_default[TOUCH_FILTER_NUM] = {
+	[TOUCH_FILTER_UP_THRESHOLD] = 3,
+	[TOUCH_FILTER_TOLERANCE] = 2,
+	[TOUCH_FILTER_AIM_SENSITIVITY] = 2,
+	[TOUCH_FILTER_TAP_STABILITY] = 2,
+	[TOUCH_FILTER_EDGE_FILTER] = 2,
+	[TOUCH_FILTER_PANEL_ORIENTATION] = 0,
+	[TOUCH_FILTER_EXPERT_MODE] = GOODIX_EXPERT_LEVEL_OFF,
+};
+
+void brl_init_touch_filters(struct goodix_ts_core *cd)
 {
+	memcpy(cd->touch_filters, goodix_filter_default,
+	       sizeof(cd->touch_filters));
+}
+
+static u8 brl_panel_orientation_bits(u8 orientation)
+{
+	switch (orientation) {
+	case 1:
+		return 0x40;
+	case 3:
+		return 0x80;
+	default:
+		return 0x00;
+	}
+}
+
+static int brl_send_touch_filters(struct goodix_ts_core *cd)
+{
+	const u8 *filters;
+	u8 tolerance, up_threshold, aim_sensitivity, tap_stability;
 	struct goodix_ts_cmd cmd;
-	int ret = 0;
 
-	/*
-	this is how the data for game cmd works
+	filters = cd->game_mode ? cd->touch_filters : goodix_filter_default;
 
-	data0 (0x00 = 00000000)
+	if (filters[TOUCH_FILTER_EXPERT_MODE] != GOODIX_EXPERT_LEVEL_OFF) {
+		const u32 *preset =
+			&cd->board_data.touch_expert
+				 [(filters[TOUCH_FILTER_EXPERT_MODE] - 1) *
+				  GOODIX_EXPERT_PARAM_NUM];
 
-	Bit 7 | Panel_Orientation | value: 0
-	Bit 6 | Panel_Orientation | value: 0
-	-------------------------------------------
-	Bit 5 | Touch_Tolerance | value: 0
-	Bit 4 | Touch_Tolerance | value: 0
-	Bit 3 | Touch_Tolerance | value: 0
-	-------------------------------------------
-	Bit 2 | Touch_UP_THRESHOLD | value: 0
-	Bit 1 | Touch_UP_THRESHOLD | value: 0
-	Bit 0 | Touch_UP_THRESHOLD | value: 0
-
-	data1 (0x00 = 00000000)
-
-	Bit 7 | Touch_Edge_Filter | value: 0
-	Bit 6 | Touch_Edge_Filter | value: 0
-	-------------------------------------------
-	Bit 5 | Touch_Aim_Sensitivity | value: 0
-	Bit 4 | Touch_Aim_Sensitivity | value: 0
-	Bit 3 | Touch_Aim_Sensitivity | value: 0
-	-------------------------------------------
-	Bit 2 | Touch_Tap_Stability | value: 0
-	Bit 1 | Touch_Tap_Stability | value: 0
-	Bit 0 | Touch_Tap_Stability | value: 0
-	*/
-
-    if (high) {
-		cmd.cmd = GOODIX_GAME_CMD;
-		cmd.len = 6;
-		cmd.data[0] = 0x00;
-		cmd.data[1] = 0x00;
-		ret = cd->hw_ops->send_cmd(cd, &cmd);
-		if (ret < 0) {
-			ts_err("edge filter: failed to send game cmd");
-			goto exit;
-		}
-		ts_info("edge filter: game mode");
-		cd->edge_filter = game;
-    } else {
-		cmd.cmd = GOODIX_NORMAL_CMD;
-		cmd.len = 6;
-		cmd.data[0] = 0x02;
-		cmd.data[1] = 0x80;
-		ret = cd->hw_ops->send_cmd(cd, &cmd);
-		if (ret < 0) {
-			ts_err("edge filter: failed to send normal cmd");
-			goto exit;
-		}
-		ts_info("edge filter: normal mode");
-		cd->edge_filter = normal;
+		tolerance = preset[GOODIX_EXPERT_TOLERANCE];
+		up_threshold = preset[GOODIX_EXPERT_UP_THRESHOLD];
+		aim_sensitivity = preset[GOODIX_EXPERT_AIM_SENSITIVITY];
+		tap_stability = preset[GOODIX_EXPERT_TAP_STABILITY];
+	} else {
+		tolerance = filters[TOUCH_FILTER_TOLERANCE];
+		up_threshold = filters[TOUCH_FILTER_UP_THRESHOLD];
+		aim_sensitivity = filters[TOUCH_FILTER_AIM_SENSITIVITY];
+		tap_stability = filters[TOUCH_FILTER_TAP_STABILITY];
 	}
 
-exit:
-	return ret;
+	cmd.cmd = cd->game_mode ? GOODIX_GAME_CMD : GOODIX_NORMAL_CMD;
+	cmd.len = 6;
+	cmd.data[0] = brl_panel_orientation_bits(
+			      filters[TOUCH_FILTER_PANEL_ORIENTATION]) |
+		      (tolerance & 0x07) << 3 | (up_threshold & 0x07);
+	cmd.data[1] = (filters[TOUCH_FILTER_EDGE_FILTER] & 0x03) << 6 |
+		      (aim_sensitivity & 0x07) << 3 | (tap_stability & 0x07);
+
+	return cd->hw_ops->send_cmd(cd, &cmd);
+}
+
+static int brl_set_game_mode(struct goodix_ts_core *cd, bool enabled)
+{
+	bool previous = cd->game_mode;
+	int ret;
+
+	cd->game_mode = enabled;
+
+	ret = brl_send_touch_filters(cd);
+	if (ret < 0) {
+		ts_err("game mode: failed to send %s cmd",
+		       enabled ? "game" : "normal");
+		cd->game_mode = previous;
+		return ret;
+	}
+
+	ts_info("game mode: %s", enabled ? "enabled" : "disabled");
+
+	return 0;
+}
+
+static bool brl_filter_in_expert_preset(enum touch_filter_type filter)
+{
+	switch (filter) {
+	case TOUCH_FILTER_UP_THRESHOLD:
+	case TOUCH_FILTER_TOLERANCE:
+	case TOUCH_FILTER_AIM_SENSITIVITY:
+	case TOUCH_FILTER_TAP_STABILITY:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int brl_set_touch_filter(struct goodix_ts_core *cd,
+				enum touch_filter_type filter, int value)
+{
+	u8 previous, previous_expert;
+	int ret;
+
+	if (filter >= TOUCH_FILTER_NUM)
+		return -EINVAL;
+
+	if (value < 0 || value > goodix_filter_max[filter]) {
+		ts_err("touch filter %d: value %d outside of range 0 - %d",
+		       filter, value, goodix_filter_max[filter]);
+		return -EINVAL;
+	}
+
+	previous = cd->touch_filters[filter];
+	previous_expert = cd->touch_filters[TOUCH_FILTER_EXPERT_MODE];
+	cd->touch_filters[filter] = value;
+
+	if (brl_filter_in_expert_preset(filter))
+		cd->touch_filters[TOUCH_FILTER_EXPERT_MODE] =
+			GOODIX_EXPERT_LEVEL_OFF;
+
+	ret = brl_send_touch_filters(cd);
+	if (ret < 0) {
+		ts_err("touch filter %d: failed to send cmd", filter);
+		cd->touch_filters[filter] = previous;
+		cd->touch_filters[TOUCH_FILTER_EXPERT_MODE] = previous_expert;
+		return ret;
+	}
+
+	ts_info("touch filter %d set to %d", filter, value);
+
+	return 0;
 }
 
 int brl_resume(struct goodix_ts_core *cd)
@@ -1615,7 +1694,8 @@ static struct goodix_ts_hw_ops brl_hw_ops = {
 	.after_event_handler = brl_after_event_handler,
 	.get_capacitance_data = brl_get_capacitance_data,
 	.switch_report_rate = brl_switch_report_rate,
-	.switch_edge_filter = brl_switch_edge_filter,
+	.set_game_mode = brl_set_game_mode,
+	.set_touch_filter = brl_set_touch_filter,
 };
 
 struct goodix_ts_hw_ops *goodix_get_hw_ops(void)

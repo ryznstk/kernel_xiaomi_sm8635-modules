@@ -1008,6 +1008,30 @@ int goodix_check_ts_id_gpio(struct device *dev)
  * @board_data: pointer to board data structure
  * return: 0 - no error, <0 error
  */
+static const u32 goodix_touch_expert_default[GOODIX_EXPERT_LEVEL_NUM *
+					     GOODIX_EXPERT_PARAM_NUM] = {
+	2, 3, 2, 2, 4, 3, 3, 2, 3, 3, 4, 2,
+};
+
+static void
+goodix_parse_dt_touch_expert(struct device_node *node,
+			     struct goodix_ts_board_data *board_data)
+{
+	int ret;
+
+	ret = of_property_read_u32_array(node, "goodix,touch-expert-array",
+					 board_data->touch_expert,
+					 ARRAY_SIZE(board_data->touch_expert));
+	if (ret) {
+		ts_info("can't find touch-expert-array, use defaults:%d", ret);
+		memcpy(board_data->touch_expert, goodix_touch_expert_default,
+		       sizeof(board_data->touch_expert));
+		return;
+	}
+
+	ts_info("get touch-expert-array from dt");
+}
+
 static int goodix_parse_dt_resolution(struct device_node *node,
 		struct goodix_ts_board_data *board_data)
 {
@@ -1183,6 +1207,7 @@ static int goodix_parse_dt(struct device_node *node,
 		return r;
 	}
 
+	goodix_parse_dt_touch_expert(node, board_data);
 
 	/*get pen-enable switch and pen keys, must after "key map"*/
 	board_data->pen_enable = of_property_read_bool(node,
@@ -1966,11 +1991,7 @@ out:
 		core_data->hw_ops->switch_report_rate(core_data, true);
 	}
 
-	if (core_data->edge_filter == game) {
-		core_data->hw_ops->switch_edge_filter(core_data, true);
-	} else {
-		core_data->hw_ops->switch_edge_filter(core_data, false);
-	}
+	core_data->hw_ops->set_game_mode(core_data, core_data->game_mode);
 
 	ts_info("Resume end");
 	return 0;
@@ -2056,8 +2077,18 @@ static int goodix_set_cur_value(void *private, enum touch_mode mode, int value)
 		break;
 	case TOUCH_MODE_REPORT_RATE:
 		ts_core->hw_ops->switch_report_rate(ts_core, value);
-		ts_core->hw_ops->switch_edge_filter(ts_core, value);
 		goto exit;
+	case TOUCH_MODE_GAME_MODE:
+		return ts_core->hw_ops->set_game_mode(ts_core, value != 0);
+	case TOUCH_MODE_TOUCH_UP_THRESHOLD:
+	case TOUCH_MODE_TOUCH_TOLERANCE:
+	case TOUCH_MODE_TOUCH_AIM_SENSITIVITY:
+	case TOUCH_MODE_TOUCH_TAP_STABILITY:
+	case TOUCH_MODE_TOUCH_EDGE_FILTER:
+	case TOUCH_MODE_PANEL_ORIENTATION:
+	case TOUCH_MODE_EXPERT_MODE:
+		return ts_core->hw_ops->set_touch_filter(
+			ts_core, touch_mode_to_filter(mode), value);
 	default:
 		ts_err("handler got mode %d with value %d, not implemented",
 		       mode, value);
@@ -2085,7 +2116,17 @@ static int goodix_get_mode_value(void *private, enum touch_mode mode)
 	case TOUCH_MODE_NONUI_MODE:
 		return ts_core->nonui_enabled ? 2 : 0;
 	case TOUCH_MODE_REPORT_RATE:
-		return ts_core->high_report_rate ? 1 : 0;
+		return ts_core->high_report_rate;
+	case TOUCH_MODE_GAME_MODE:
+		return ts_core->game_mode;
+	case TOUCH_MODE_TOUCH_UP_THRESHOLD:
+	case TOUCH_MODE_TOUCH_TOLERANCE:
+	case TOUCH_MODE_TOUCH_AIM_SENSITIVITY:
+	case TOUCH_MODE_TOUCH_TAP_STABILITY:
+	case TOUCH_MODE_TOUCH_EDGE_FILTER:
+	case TOUCH_MODE_PANEL_ORIENTATION:
+	case TOUCH_MODE_EXPERT_MODE:
+		return ts_core->touch_filters[touch_mode_to_filter(mode)];
 	default:
 		ts_err("handler got mode %d, not implemented", mode);
 		return -EINVAL;
@@ -2457,6 +2498,8 @@ static int goodix_start_later_init(struct goodix_ts_core *ts_core)
 
 static void xiaomi_touch_init(struct goodix_ts_core *ts_core)
 {
+	brl_init_touch_filters(ts_core);
+
 	ts_core->xiaomi_touch.set_mode_value = goodix_set_cur_value;
 	ts_core->xiaomi_touch.get_mode_value = goodix_get_mode_value;
 	ts_core->xiaomi_touch.private = ts_core;
