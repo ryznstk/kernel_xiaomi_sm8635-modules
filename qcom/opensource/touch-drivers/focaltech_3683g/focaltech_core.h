@@ -159,6 +159,18 @@
 #define GESTURE_SINGLETAP_EN   (1 << GESTURE_SINGLETAP)
 #define GESTURE_FOD_EN         (1 << GESTURE_FOD)
 
+enum fts_expert_param {
+	FTS_EXPERT_TOLERANCE,
+	FTS_EXPERT_UP_THRESHOLD,
+	FTS_EXPERT_AIM_SENSITIVITY,
+	FTS_EXPERT_TAP_STABILITY,
+	FTS_EXPERT_PARAM_NUM,
+};
+
+#define FTS_EXPERT_LEVEL_NUM 3
+#define FTS_EXPERT_LEVEL_OFF 0
+#define FTS_TOUCH_RANGE_NUM 5
+
 /*****************************************************************************
 * Private enumerations, structures and unions using typedef
 *****************************************************************************/
@@ -186,6 +198,9 @@ struct fts_ts_platform_data {
 	u32 max_touch_number;
 	u32 super_resolution_factors;
 	int fod_status;	
+	u32 touch_range[FTS_TOUCH_RANGE_NUM];
+	u32 touch_def[FTS_EXPERT_PARAM_NUM];
+	u32 touch_expert[FTS_EXPERT_LEVEL_NUM * FTS_EXPERT_PARAM_NUM];
 };
 
 struct ts_event {
@@ -312,7 +327,7 @@ struct fts_ts_data {
 	struct mutex cmd_update_mutex;
 	int fod_status;
 	bool high_report_rate;
-	bool edge_filter;
+	u8 touch_filters[TOUCH_FILTER_NUM];
 	u8 gesture_status;
 	struct xiaomi_touch_interface xiaomi_touch;
 };
@@ -381,7 +396,8 @@ int fts_ts_remove_entry(struct fts_ts_data *ts_data);
 
 int fts_check_ts_id_gpio(struct device *dev);
 int fts_switch_report_rate(struct fts_ts_data *ts_data, bool enable);
-int fts_switch_edge_filter(struct fts_ts_data *ts_data, bool high_filter);
+int fts_set_game_mode(struct fts_ts_data *ts_data, bool enabled);
+void fts_init_touch_filters(struct fts_ts_data *ts_data);
 
 /* Gesture functions */
 int fts_gesture_init(struct fts_ts_data *ts_data);

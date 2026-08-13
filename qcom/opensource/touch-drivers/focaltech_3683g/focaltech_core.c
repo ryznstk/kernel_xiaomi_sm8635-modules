@@ -1997,6 +1997,63 @@ static int fts_get_dt_coords(struct device *dev, char *name,
 	return 0;
 }
 
+static const u32 fts_touch_range_default[FTS_TOUCH_RANGE_NUM] = {
+	1, 5, 10, 15, 20,
+};
+
+static const u32 fts_touch_def_default[FTS_EXPERT_PARAM_NUM] = {
+	3,
+	3,
+	3,
+	3,
+};
+
+static const u32 fts_touch_expert_default[FTS_EXPERT_LEVEL_NUM *
+					  FTS_EXPERT_PARAM_NUM] = {
+	10, 10, 10, 10, 20, 20, 15, 10, 20, 20, 20, 10,
+};
+
+static void fts_parse_dt_touch_filters(struct device_node *np,
+				       struct fts_ts_platform_data *pdata)
+{
+	static const struct {
+		const char *name;
+		const u32 *fallback;
+		int count;
+	} tables[] = {
+		{ "focaltech,touch-range-array", fts_touch_range_default,
+		  FTS_TOUCH_RANGE_NUM },
+		{ "focaltech,touch-def-array", fts_touch_def_default,
+		  FTS_EXPERT_PARAM_NUM },
+		{ "focaltech,touch-expert-array", fts_touch_expert_default,
+		  FTS_EXPERT_LEVEL_NUM * FTS_EXPERT_PARAM_NUM },
+	};
+	u32 *dests[] = { pdata->touch_range, pdata->touch_def,
+			 pdata->touch_expert };
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(tables); i++) {
+		ret = of_property_read_u32_array(np, tables[i].name, dests[i],
+						 tables[i].count);
+		if (ret) {
+			FTS_INFO("can't find %s, use defaults:%d",
+				 tables[i].name, ret);
+			memcpy(dests[i], tables[i].fallback,
+			       tables[i].count * sizeof(u32));
+			continue;
+		}
+		FTS_INFO("get %s from dt", tables[i].name);
+	}
+
+	for (i = 0; i < FTS_EXPERT_PARAM_NUM; i++) {
+		if (pdata->touch_def[i] >= FTS_TOUCH_RANGE_NUM) {
+			FTS_ERROR("touch-def-array[%d] is %d, clamping", i,
+				  pdata->touch_def[i]);
+			pdata->touch_def[i] = FTS_TOUCH_RANGE_NUM - 1;
+		}
+	}
+}
+
 static int fts_parse_dt(struct device *dev, struct fts_ts_platform_data *pdata)
 {
 	int ret = 0;
@@ -2012,6 +2069,8 @@ static int fts_parse_dt(struct device *dev, struct fts_ts_platform_data *pdata)
 	ret = fts_get_dt_coords(dev, "focaltech,display-coords", pdata);
 	if (ret < 0)
 		FTS_ERROR("Unable to get display-coords");
+
+	fts_parse_dt_touch_filters(np, pdata);
 
 	/* key */
 	pdata->have_key = of_property_read_bool(np, "focaltech,have-key");
@@ -2209,9 +2268,7 @@ static int fts_ts_resume(struct device *dev)
 		fts_switch_report_rate(ts_data, ts_data->high_report_rate);
 	}
 
-	if (ts_data->edge_filter) {
-		fts_switch_edge_filter(ts_data, ts_data->edge_filter);
-	}
+	fts_set_game_mode(ts_data, ts_data->game_mode);
 
 	notify_oneshot_sensor(ONESHOT_SENSOR_FOD_PRESS, 0);
 
@@ -2468,38 +2525,210 @@ int fts_switch_report_rate(struct fts_ts_data *ts_data, bool enable)
 
 #define FTS_REG_EDGE_FILTER_EN              0x8C
 #define FTS_REG_EDGE_FILTER_LEVEL           0x8D
-int fts_switch_edge_filter(struct fts_ts_data *ts_data, bool high_filter)
-{
-	int ret;
-	u8 high_cmd[7] = {0xC1, 0x01, 0x1E, 0x01, 0x01, 0x01, 0x01};
-	u8 low_cmd[7] = {0xC1, 0x00, 0x03, 0x0A, 0x0A, 0x0A, 0x0A};
+#define FTS_REG_GAME_MODE 0xC1
 
-	if (!ts_data) {
-		FTS_ERROR("fts_switch_edge_filter: ts_data is NULL");
-		return -EINVAL;
+#define FTS_EDGE_FILTER_OFF 0
+#define FTS_EDGE_FILTER_LEFT 1
+#define FTS_EDGE_FILTER_RIGHT 2
+#define FTS_EDGE_FILTER_LEFT_GAME 3
+#define FTS_EDGE_FILTER_RIGHT_GAME 4
+#define FTS_ACTIVE_MODE_OFF 0x03
+
+#define FTS_ACTIVE_MODE_ON 0x1E
+
+static const u8 fts_filter_max[TOUCH_FILTER_NUM] = {
+	[TOUCH_FILTER_UP_THRESHOLD] = FTS_TOUCH_RANGE_NUM - 1,
+	[TOUCH_FILTER_TOLERANCE] = FTS_TOUCH_RANGE_NUM - 1,
+	[TOUCH_FILTER_AIM_SENSITIVITY] = FTS_TOUCH_RANGE_NUM - 1,
+	[TOUCH_FILTER_TAP_STABILITY] = FTS_TOUCH_RANGE_NUM - 1,
+	[TOUCH_FILTER_EDGE_FILTER] = 3,
+	[TOUCH_FILTER_PANEL_ORIENTATION] = 3,
+	[TOUCH_FILTER_EXPERT_MODE] = FTS_EXPERT_LEVEL_NUM,
+};
+
+static u8 fts_panel_orientation_reg(u8 orientation, bool game_mode)
+{
+	switch (orientation) {
+	case 1:
+		return game_mode ? FTS_EDGE_FILTER_LEFT_GAME :
+				   FTS_EDGE_FILTER_LEFT;
+	case 3:
+		return game_mode ? FTS_EDGE_FILTER_RIGHT_GAME :
+				   FTS_EDGE_FILTER_RIGHT;
+	default:
+		return FTS_EDGE_FILTER_OFF;
+	}
+}
+
+static int fts_send_touch_filters(struct fts_ts_data *ts_data)
+{
+	struct fts_ts_platform_data *pdata = ts_data->pdata;
+	const u8 *filters = ts_data->touch_filters;
+	u32 params[FTS_EXPERT_PARAM_NUM];
+	u8 cmd[7];
+	int i, ret;
+
+	if (ts_data->game_mode &&
+	    filters[TOUCH_FILTER_EXPERT_MODE] != FTS_EXPERT_LEVEL_OFF) {
+		const u32 *preset =
+			&pdata->touch_expert[(filters[TOUCH_FILTER_EXPERT_MODE] -
+					      1) *
+					     FTS_EXPERT_PARAM_NUM];
+
+		for (i = 0; i < FTS_EXPERT_PARAM_NUM; i++)
+			params[i] = preset[i];
+	} else if (ts_data->game_mode) {
+		params[FTS_EXPERT_TOLERANCE] =
+			pdata->touch_range[filters[TOUCH_FILTER_TOLERANCE]];
+		params[FTS_EXPERT_UP_THRESHOLD] =
+			pdata->touch_range[filters[TOUCH_FILTER_UP_THRESHOLD]];
+		params[FTS_EXPERT_AIM_SENSITIVITY] =
+			pdata->touch_range[filters[TOUCH_FILTER_AIM_SENSITIVITY]];
+		params[FTS_EXPERT_TAP_STABILITY] =
+			pdata->touch_range[filters[TOUCH_FILTER_TAP_STABILITY]];
+	} else {
+		for (i = 0; i < FTS_EXPERT_PARAM_NUM; i++)
+			params[i] = pdata->touch_range[pdata->touch_def[i]];
 	}
 
-	ret = fts_write_reg(FTS_REG_EDGE_FILTER_EN, 0);
+	ret = fts_write_reg(
+		FTS_REG_EDGE_FILTER_EN,
+		fts_panel_orientation_reg(
+			ts_data->game_mode ?
+				filters[TOUCH_FILTER_PANEL_ORIENTATION] :
+				0,
+			ts_data->game_mode));
 	if (ret < 0) {
-		FTS_ERROR("failed to disable edge filter enable register, ret=%d", ret);
+		FTS_ERROR("failed to set edge filter side, ret=%d", ret);
 		return ret;
 	}
 
-	ret = fts_write_reg(FTS_REG_EDGE_FILTER_LEVEL, 0);
+	ret = fts_write_reg(
+		FTS_REG_EDGE_FILTER_LEVEL,
+		ts_data->game_mode ? filters[TOUCH_FILTER_EDGE_FILTER] : 0);
 	if (ret < 0) {
 		FTS_ERROR("failed to set edge filter level, ret=%d", ret);
 		return ret;
 	}
 
-	ret = fts_write(high_filter ? high_cmd : low_cmd, sizeof(high_cmd));
+	cmd[0] = FTS_REG_GAME_MODE;
+	cmd[1] = ts_data->game_mode;
+	cmd[2] = ts_data->game_mode ? FTS_ACTIVE_MODE_ON : FTS_ACTIVE_MODE_OFF;
+	cmd[3] = params[FTS_EXPERT_TOLERANCE];
+	cmd[4] = params[FTS_EXPERT_UP_THRESHOLD];
+	cmd[5] = params[FTS_EXPERT_AIM_SENSITIVITY];
+	cmd[6] = params[FTS_EXPERT_TAP_STABILITY];
+
+	ret = fts_write(cmd, sizeof(cmd));
 	if (ret < 0) {
-		FTS_ERROR("failed to write edge filter command, ret=%d", ret);
+		FTS_ERROR("failed to write game mode command, ret=%d", ret);
 		return ret;
 	}
 
-	ts_data->edge_filter = high_filter;
-	FTS_INFO("edge_filter set to %s", high_filter ? "high" : "low");
+	FTS_INFO("game mode cmd: %02X,%02X,%02X,%02X,%02X,%02X,%02X", cmd[0],
+		 cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6]);
+
 	return 0;
+}
+
+void fts_init_touch_filters(struct fts_ts_data *ts_data)
+{
+	struct fts_ts_platform_data *pdata = ts_data->pdata;
+	u8 *filters = ts_data->touch_filters;
+
+	filters[TOUCH_FILTER_TOLERANCE] =
+		pdata->touch_def[FTS_EXPERT_TOLERANCE];
+	filters[TOUCH_FILTER_UP_THRESHOLD] =
+		pdata->touch_def[FTS_EXPERT_UP_THRESHOLD];
+	filters[TOUCH_FILTER_AIM_SENSITIVITY] =
+		pdata->touch_def[FTS_EXPERT_AIM_SENSITIVITY];
+	filters[TOUCH_FILTER_TAP_STABILITY] =
+		pdata->touch_def[FTS_EXPERT_TAP_STABILITY];
+	filters[TOUCH_FILTER_EDGE_FILTER] = 2;
+	filters[TOUCH_FILTER_PANEL_ORIENTATION] = 0;
+	filters[TOUCH_FILTER_EXPERT_MODE] = FTS_EXPERT_LEVEL_OFF;
+}
+
+int fts_set_game_mode(struct fts_ts_data *ts_data, bool enabled)
+{
+	bool previous;
+	int ret;
+
+	if (!ts_data) {
+		FTS_ERROR("fts_set_game_mode: ts_data is NULL");
+		return -EINVAL;
+	}
+
+	mutex_lock(&ts_data->cmd_update_mutex);
+
+	previous = ts_data->game_mode;
+	ts_data->game_mode = enabled;
+
+	ret = fts_send_touch_filters(ts_data);
+	if (ret < 0) {
+		ts_data->game_mode = previous;
+		goto exit;
+	}
+
+	FTS_INFO("game mode: %s", enabled ? "enabled" : "disabled");
+
+exit:
+	mutex_unlock(&ts_data->cmd_update_mutex);
+	return ret;
+}
+
+static bool fts_filter_in_expert_preset(enum touch_filter_type filter)
+{
+	switch (filter) {
+	case TOUCH_FILTER_UP_THRESHOLD:
+	case TOUCH_FILTER_TOLERANCE:
+	case TOUCH_FILTER_AIM_SENSITIVITY:
+	case TOUCH_FILTER_TAP_STABILITY:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int fts_set_touch_filter(struct fts_ts_data *ts_data,
+				enum touch_filter_type filter, int value)
+{
+	u8 previous, previous_expert;
+	int ret;
+
+	if (!ts_data || filter >= TOUCH_FILTER_NUM)
+		return -EINVAL;
+
+	if (value < 0 || value > fts_filter_max[filter]) {
+		FTS_ERROR("touch filter %d: value %d outside of range 0 - %d",
+			  filter, value, fts_filter_max[filter]);
+		return -EINVAL;
+	}
+
+	mutex_lock(&ts_data->cmd_update_mutex);
+
+	previous = ts_data->touch_filters[filter];
+	previous_expert = ts_data->touch_filters[TOUCH_FILTER_EXPERT_MODE];
+	ts_data->touch_filters[filter] = value;
+
+	if (fts_filter_in_expert_preset(filter))
+		ts_data->touch_filters[TOUCH_FILTER_EXPERT_MODE] =
+			FTS_EXPERT_LEVEL_OFF;
+
+	ret = fts_send_touch_filters(ts_data);
+	if (ret < 0) {
+		FTS_ERROR("touch filter %d: failed to send cmd", filter);
+		ts_data->touch_filters[filter] = previous;
+		ts_data->touch_filters[TOUCH_FILTER_EXPERT_MODE] =
+			previous_expert;
+		goto exit;
+	}
+
+	FTS_INFO("touch filter %d set to %d", filter, value);
+
+exit:
+	mutex_unlock(&ts_data->cmd_update_mutex);
+	return ret;
 }
 
 static void fts_update_gesture_state(struct fts_ts_data *ts_data, int bit, bool enable)
@@ -2525,7 +2754,17 @@ static int fts_get_mode_value(void *private, enum touch_mode mode)
     case TOUCH_MODE_FOD_PRESS_GESTURE:
         return (fts_data->gesture_status & GESTURE_FOD_EN) ? 1 : 0;
     case TOUCH_MODE_REPORT_RATE:
-        return fts_data->high_report_rate ? 1 : 0;
+	    return fts_data->high_report_rate;
+    case TOUCH_MODE_GAME_MODE:
+	    return fts_data->game_mode;
+    case TOUCH_MODE_TOUCH_UP_THRESHOLD:
+    case TOUCH_MODE_TOUCH_TOLERANCE:
+    case TOUCH_MODE_TOUCH_AIM_SENSITIVITY:
+    case TOUCH_MODE_TOUCH_TAP_STABILITY:
+    case TOUCH_MODE_TOUCH_EDGE_FILTER:
+    case TOUCH_MODE_PANEL_ORIENTATION:
+    case TOUCH_MODE_EXPERT_MODE:
+	    return fts_data->touch_filters[touch_mode_to_filter(mode)];
     default:
         return -EINVAL;
     }
@@ -2548,8 +2787,18 @@ static int fts_set_cur_value(void *private, enum touch_mode mode, int value)
 		break;
 	case TOUCH_MODE_REPORT_RATE:
 		fts_switch_report_rate(fts_data, value != 0 ? true : false);
-		fts_switch_edge_filter(fts_data, value != 0 ? true : false);
 		break;
+	case TOUCH_MODE_GAME_MODE:
+		return fts_set_game_mode(fts_data, value != 0);
+	case TOUCH_MODE_TOUCH_UP_THRESHOLD:
+	case TOUCH_MODE_TOUCH_TOLERANCE:
+	case TOUCH_MODE_TOUCH_AIM_SENSITIVITY:
+	case TOUCH_MODE_TOUCH_TAP_STABILITY:
+	case TOUCH_MODE_TOUCH_EDGE_FILTER:
+	case TOUCH_MODE_PANEL_ORIENTATION:
+	case TOUCH_MODE_EXPERT_MODE:
+		return fts_set_touch_filter(fts_data,
+					    touch_mode_to_filter(mode), value);
 	default:
 		FTS_ERROR("handler got mode %d with value %d, not implemented",
 			 mode, value);
@@ -2561,6 +2810,8 @@ static int fts_set_cur_value(void *private, enum touch_mode mode, int value)
 static void fts_init_xiaomi_touchfeature(struct fts_ts_data *ts_data)
 {
 	mutex_init(&ts_data->cmd_update_mutex);
+
+	fts_init_touch_filters(ts_data);
 
 	ts_data->xiaomi_touch.set_mode_value = fts_set_cur_value;
 	ts_data->xiaomi_touch.get_mode_value = fts_get_mode_value;
